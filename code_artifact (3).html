@@ -1,0 +1,1296 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>離子化合物拼圖遊戲 (Ionic Bonding Game)</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f0fdf4; touch-action: none; }
+        .scrollable-body { touch-action: auto; }
+        .puzzle-drop-shadow { filter: drop-shadow(0px 4px 6px rgba(0,0,0,0.25)); }
+        
+        input[type=number]::-webkit-inner-spin-button, 
+        input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+        input[type=number] { -moz-appearance: textfield; }
+        
+        .fade-in { animation: fadeIn 0.4s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        
+        .dragging-clone {
+            position: fixed;
+            pointer-events: none;
+            z-index: 9999;
+            transform: translate(-50%, -50%) scale(1.1);
+            filter: drop-shadow(0px 10px 15px rgba(0,0,0,0.3));
+            transition: transform 0.1s;
+        }
+    </style>
+</head>
+<body class="scrollable-body">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const DEFAULT_ELEMENTS = {
+            'Li': { z: 3, config: '2,1', charge: 1, symbol: 'Li', name: '鋰' },
+            'N': { z: 7, config: '2,5', charge: -3, symbol: 'N', name: '氮' },
+            'O': { z: 8, config: '2,6', charge: -2, symbol: 'O', name: '氧' },
+            'F': { z: 9, config: '2,7', charge: -1, symbol: 'F', name: '氟' },
+            'Na': { z: 11, config: '2,8,1', charge: 1, symbol: 'Na', name: '鈉' },
+            'Mg': { z: 12, config: '2,8,2', charge: 2, symbol: 'Mg', name: '鎂' },
+            'Al': { z: 13, config: '2,8,3', charge: 3, symbol: 'Al', name: '鋁' },
+            'P': { z: 15, config: '2,8,5', charge: -3, symbol: 'P', name: '磷' },
+            'S': { z: 16, config: '2,8,6', charge: -2, symbol: 'S', name: '硫' },
+            'Cl': { z: 17, config: '2,8,7', charge: -1, symbol: 'Cl', name: '氯' },
+            'K': { z: 19, config: '2,8,8,1', charge: 1, symbol: 'K', name: '鉀' },
+            'Ca': { z: 20, config: '2,8,8,2', charge: 2, symbol: 'Ca', name: '鈣' },
+        };
+
+        let ELEMENTS = { ...DEFAULT_ELEMENTS };
+
+        const DEFAULT_GAME_PAIRS = [
+            { metal: 'Li', nonmetal: 'F', compoundName: '氟化鋰' },  // 1:1
+            { metal: 'Mg', nonmetal: 'Cl', compoundName: '氯化鎂' }, // 1:2
+            { metal: 'Ca', nonmetal: 'O', compoundName: '氧化鈣' },  // 2:2 -> 1:1
+            { metal: 'K', nonmetal: 'N', compoundName: '氮化鉀' },   // 3:1
+            { metal: 'Al', nonmetal: 'S', compoundName: '硫化鋁' }   // 2:3
+        ];
+
+        let db = null;
+        let auth = null;
+        let setDocRef = null;
+        let docRef = null;
+        
+        const initFirebase = async () => {
+            let firebaseConfig = null;
+            if (typeof __firebase_config !== 'undefined') {
+                try {
+                    firebaseConfig = typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : __firebase_config;
+                } catch (e) {
+                    console.error("設定檔解析失敗", e);
+                }
+            }
+            if (!firebaseConfig) return false;
+
+            try {
+                const { initializeApp } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js");
+                const { getAuth, signInAnonymously, signInWithCustomToken } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js");
+                const { getFirestore, doc, setDoc } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
+                
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+                
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                
+                const userId = auth.currentUser?.uid;
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'ionic-game-default';
+                
+                if (userId) {
+                    setDocRef = setDoc;
+                    docRef = doc(db, 'artifacts', appId, 'users', userId, 'gameData', 'save1');
+                    return true;
+                }
+                return false;
+            } catch(e) {
+                console.error("Firebase 初始化失敗:", e);
+                return false;
+            }
+        };
+
+        const CHARGE_OPTIONS = ["3+", "2+", "+", "-", "2-", "3-"];
+
+        const formatChargeDisplay = (chargeVal) => {
+            if (!chargeVal) return '';
+            const mag = Math.abs(chargeVal);
+            const sign = chargeVal > 0 ? '+' : '-';
+            return mag === 1 ? sign : `${mag}${sign}`;
+        };
+
+        const getStableConfigOuterOnly = (originalConfig, chargeVal) => {
+            if (chargeVal > 0) {
+                return ''; 
+            } else {
+                return '8';
+            }
+        };
+
+        const gcd = (a, b) => b === 0 ? a : gcd(b, a % b);
+
+        const PuzzlePiece = ({ symbol, charge, className = "", style = {} }) => {
+            const absCharge = Math.abs(charge);
+            const isPositive = charge > 0;
+            
+            const W = 90;  
+            const T = 25; 
+            const H = 70;  
+            const fullHeight = absCharge * H;
+
+            let pathD = "";
+            if (isPositive) {
+                // Metal Cation: Concave notches on the right side
+                pathD = `M 0,0 L ${W+T},0 `;
+                for(let i=0; i<absCharge; i++) {
+                    pathD += `L ${W+T},${i*H + H/4} L ${W},${i*H + H/2} L ${W+T},${i*H + (3*H)/4} L ${W+T},${(i+1)*H} `;
+                }
+                pathD += `L 0,${fullHeight} Z`;
+            } else {
+                // Non-metal Anion: Convex protrusions on the left side
+                pathD = `M ${T},0 L ${T+W},0 L ${T+W},${fullHeight} L ${T},${fullHeight} `;
+                for(let i=absCharge-1; i>=0; i--) {
+                    pathD += `L ${T},${i*H + (3*H)/4} L 0,${i*H + H/2} L ${T},${i*H + H/4} L ${T},${i*H} `;
+                }
+                pathD += `Z`;
+            }
+
+            const fill = isPositive ? "#f87171" : "#4ade80";
+            const centerX = isPositive ? (W+T)/2 - T/3 : T + W/2;
+            const centerY = fullHeight / 2;
+            const displayCharge = formatChargeDisplay(charge);
+
+            return (
+                <svg className={`puzzle-drop-shadow ${className}`} 
+                     width={W+T} 
+                     height={fullHeight} 
+                     style={{ ...style, marginBottom: '4px' }}>
+                    <path d={pathD} fill={fill} stroke="rgba(0,0,0,0.4)" strokeWidth="1.5" strokeLinejoin="round" />
+                    <text x={centerX} y={centerY + 8} textAnchor="middle" fontSize="26" fontWeight="bold" fill="#1f2937" fontFamily="sans-serif">
+                        {symbol}
+                        <tspan dy="-12" fontSize="16" fontWeight="bold">{displayCharge}</tspan>
+                    </text>
+                </svg>
+            );
+        };
+
+        const BohrDiagramOuterOnly = ({ symbol, configStr, chargeStr, showBrackets, coefficient = 1 }) => {
+            const electronsCount = configStr ? parseInt(configStr) : 0;
+            const shellRadius = 55;
+            const svgWidth = 220;
+            const svgHeight = 160;
+            const center = svgHeight / 2;
+            const xCenter = svgWidth / 2 + 10; 
+
+            const parsedCoeff = parseInt(coefficient) || 1;
+
+            return (
+                <div className="flex justify-center items-center p-2">
+                    <svg width={svgWidth} height={svgHeight} className="drop-shadow-md">
+                        {/* Nucleus Symbol */}
+                        <text x={xCenter} y={center + 10} textAnchor="middle" fontSize="32" fontWeight="bold" fill="#334155">{symbol}</text>
+
+                        {/* Outermost Valence Electrons (If non-metal) */}
+                        {electronsCount > 0 && (
+                            <g>
+                                <circle cx={xCenter} cy={center} r={shellRadius} fill="none" stroke="#94a3b8" strokeWidth="1.5" strokeDasharray="4 3" />
+                                {Array.from({ length: electronsCount }).map((_, i) => {
+                                    const angle = (i / electronsCount) * Math.PI * 2 - Math.PI / 2;
+                                    const ex = xCenter + shellRadius * Math.cos(angle);
+                                    const ey = center + shellRadius * Math.sin(angle);
+                                    return (
+                                        <circle key={`e-${i}`} cx={ex} cy={ey} r="5" fill="#ef4444" stroke="#7f1d1d" strokeWidth="1" />
+                                    );
+                                })}
+                            </g>
+                        )}
+
+                        {/* Brackets & Charges */}
+                        {showBrackets && (
+                            <g>
+                                {parsedCoeff > 1 && (
+                                    <text x="25" y={center + 10} textAnchor="middle" fontSize="32" fontWeight="bold" fill="#ea580c">{parsedCoeff}</text>
+                                )}
+                                <path d={`M 45,15 L 35,15 L 35,${svgHeight-15} L 45,${svgHeight-15}`} fill="none" stroke="#334155" strokeWidth="3" strokeLinecap="round" />
+                                <path d={`M ${svgWidth-35},15 L ${svgWidth-25},15 L ${svgWidth-25},${svgHeight-15} L ${svgWidth-35},${svgHeight-15}`} fill="none" stroke="#334155" strokeWidth="3" strokeLinecap="round" />
+                                {chargeStr && (
+                                    <text x={svgWidth - 20} y="30" textAnchor="start" fontSize="20" fontWeight="bold" fill="#334155">{chargeStr}</text>
+                                )}
+                            </g>
+                        )}
+                    </svg>
+                </div>
+            );
+        };
+
+        const ConfigPhase = ({ pair, onComplete }) => {
+            const metal = ELEMENTS[pair.metal];
+            const nonmetal = ELEMENTS[pair.nonmetal];
+
+            const [mZ, setMZ] = React.useState('');
+            const [mConfig, setMConfig] = React.useState('');
+            const [mAction, setMAction] = React.useState('');
+            const [mActionCount, setMActionCount] = React.useState('');
+            const [mCharge, setMCharge] = React.useState('');
+
+            const [nmZ, setNmZ] = React.useState('');
+            const [nmConfig, setNmConfig] = React.useState('');
+            const [nmAction, setNmAction] = React.useState('');
+            const [nmActionCount, setNmActionCount] = React.useState('');
+            const [nmCharge, setNmCharge] = React.useState('');
+            
+            const [errorMsg, setErrorMsg] = React.useState('');
+            const [isSuccess, setIsSuccess] = React.useState(false);
+            const [hints, setHints] = React.useState({ mZ: false, mConfig: false, nmZ: false, nmConfig: false });
+
+            const toggleHint = (key) => setHints(prev => ({ ...prev, [key]: !prev[key] }));
+
+            const handleVerify = () => {
+                const cleanMConfig = mConfig.replace(/\s+/g, '');
+                const cleanNmConfig = nmConfig.replace(/\s+/g, '');
+                
+                const expectedMChargeStr = formatChargeDisplay(metal.charge);
+                const expectedNmChargeStr = formatChargeDisplay(nonmetal.charge);
+
+                const expectedMValence = parseInt(metal.config.split(',').pop());
+                const expectedNmValence = parseInt(nonmetal.config.split(',').pop());
+                const expectedNmGain = 8 - expectedNmValence;
+
+                if (parseInt(mZ) !== metal.z) return setErrorMsg(`${metal.name}(${metal.symbol}) 的原子序不正確！`);
+                if (cleanMConfig !== metal.config) return setErrorMsg(`${metal.name}(${metal.symbol}) 的電子排佈不正確！`);
+                if (mAction !== 'lose') return setErrorMsg(`金屬原子傾向於「失去」電子以達到穩定狀態！`);
+                if (parseInt(mActionCount) !== expectedMValence) return setErrorMsg(`${metal.name} 應該失去最外層的 ${expectedMValence} 個電子！`);
+                if (mCharge !== expectedMChargeStr) return setErrorMsg(`${metal.name} 的離子電荷標示不正確！`);
+
+                if (parseInt(nmZ) !== nonmetal.z) return setErrorMsg(`${nonmetal.name}(${nonmetal.symbol}) 的原子序不正確！`);
+                if (cleanNmConfig !== nonmetal.config) return setErrorMsg(`${nonmetal.name}(${nonmetal.symbol}) 的電子排佈不正確！`);
+                if (nmAction !== 'gain') return setErrorMsg(`非金屬原子傾向於「獲得」電子以達到八隅體穩定狀態！`);
+                if (parseInt(nmActionCount) !== expectedNmGain) return setErrorMsg(`${nonmetal.name} 應該獲得 ${expectedNmGain} 個電子以填滿最外層！`);
+                if (nmCharge !== expectedNmChargeStr) return setErrorMsg(`${nonmetal.name} 的離子電荷標示不正確！`);
+
+                setErrorMsg('');
+                setIsSuccess(true);
+            };
+
+            const renderCard = (elem, type, z, setZ, config, setConfig, action, setAction, actionCount, setActionCount, charge, setCharge) => {
+                const prefix = type === 'metal' ? 'm' : 'nm';
+                return (
+                    <div className={`p-5 rounded-xl border shadow-sm ${type === 'metal' ? 'bg-orange-50 border-orange-200' : 'bg-blue-50 border-blue-200'}`}>
+                        <h3 className={`text-xl font-bold flex justify-between items-center mb-4 ${type === 'metal' ? 'text-orange-700' : 'text-blue-700'}`}>
+                            <span>{elem.name} ({elem.symbol})</span>
+                            <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${type === 'metal' ? 'bg-orange-200 text-orange-800' : 'bg-blue-200 text-blue-800'}`}>
+                                {type === 'metal' ? '金屬 (陽離子)' : '非金屬 (陰離子)'}
+                            </span>
+                        </h3>
+                        <div className="space-y-4 text-sm">
+                            <div>
+                                <label className="flex items-center font-semibold text-gray-700 mb-1">
+                                    原子序 (Atomic Number Z)
+                                    <button onClick={() => toggleHint(`${prefix}Z`)} className="ml-2 text-lg hover:scale-110 transition-transform focus:outline-none" title="顯示提示">💡</button>
+                                </label>
+                                {hints[`${prefix}Z`] && <p className="text-xs text-amber-600 mb-1 font-bold fade-in">提示：原子序為 {elem.z}</p>}
+                                <input type="number" value={z} onChange={e => setZ(e.target.value)} className="w-full p-2 border rounded shadow-sm outline-none focus:ring-2 focus:ring-green-400 bg-white" placeholder="請輸入原子序" />
+                            </div>
+                            <div>
+                                <label className="flex items-center font-semibold text-gray-700 mb-1">
+                                    電子排佈 (Electron Config.)
+                                    <button onClick={() => toggleHint(`${prefix}Config`)} className="ml-2 text-lg hover:scale-110 transition-transform focus:outline-none" title="顯示提示">💡</button>
+                                </label>
+                                {hints[`${prefix}Config`] && <p className="text-xs text-amber-600 mb-1 font-bold fade-in">提示：電子排佈為 {elem.config}</p>}
+                                <input type="text" value={config} onChange={e => setConfig(e.target.value)} className="w-full p-2 border rounded shadow-sm outline-none focus:ring-2 focus:ring-green-400 bg-white" placeholder="請輸入電子排佈 (如 2,8)" />
+                            </div>
+                            
+                            <div className="p-3 bg-white bg-opacity-70 rounded-lg border border-dashed border-gray-300">
+                                <label className="block font-semibold text-gray-700 mb-2">離子形成過程 (Ion Formation)</label>
+                                <div className="flex space-x-2">
+                                    <select value={action} onChange={e => setAction(e.target.value)} className="w-1/2 p-2 border rounded shadow-sm outline-none focus:ring-2 focus:ring-green-400 bg-white">
+                                        <option value="">請選擇動作...</option>
+                                        <option value="lose">失去 (Lose)</option>
+                                        <option value="gain">獲得 (Gain)</option>
+                                    </select>
+                                    <div className="relative w-1/2">
+                                        <input type="number" min="1" max="8" value={actionCount} onChange={e => setActionCount(e.target.value)} className="w-full p-2 border rounded shadow-sm outline-none focus:ring-2 focus:ring-green-400 bg-white pr-8" placeholder="電子數量" />
+                                        <span className="absolute right-2 top-2 text-gray-500 font-bold">e⁻</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="block font-semibold text-gray-700 mb-1">離子電荷 (Ion Charge)</label>
+                            <select value={charge} onChange={e => setCharge(e.target.value)} className="w-full p-2 border rounded shadow-sm outline-none bg-white focus:ring-2 focus:ring-green-400 font-bold">
+                                <option value="">請選擇...</option>
+                                {CHARGE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                            </select>
+                        </div>
+                    </div>
+                );
+            };
+
+            return (
+                <div className="fade-in bg-white p-6 rounded-2xl shadow-xl w-full max-w-4xl border border-green-100">
+                    <h2 className="text-2xl font-bold text-green-800 mb-2 border-b pb-2">步驟 1：元素分析 (Element Analysis)</h2>
+                    <p className="text-gray-600 mb-6 text-sm">請填寫原子的原子序與電子排佈，並推導其轉變成穩定離子的過程與電荷數。</p>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {renderCard(metal, 'metal', mZ, setMZ, mConfig, setMConfig, mAction, setMAction, mActionCount, setMActionCount, mCharge, setMCharge)}
+                        {renderCard(nonmetal, 'nonmetal', nmZ, setNmZ, nmConfig, setNmConfig, nmAction, setNmAction, nmActionCount, setNmActionCount, nmCharge, setNmCharge)}
+                    </div>
+
+                    {errorMsg && (
+                        <div className="mt-6 bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded animate-pulse font-semibold">
+                            ⚠️ {errorMsg}
+                        </div>
+                    )}
+
+                    {!isSuccess ? (
+                        <div className="mt-8 text-center">
+                            <button onClick={handleVerify} className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-10 rounded-full shadow-lg transition-transform transform hover:scale-105 text-lg">
+                                驗證答案 (Verify)
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="fade-in text-center bg-green-50 border-2 border-green-400 rounded-xl p-8 space-y-4 mt-8">
+                            <h3 className="text-2xl font-bold text-green-800">🎉 太棒了！元素分析完全正確！</h3>
+                            <p className="text-gray-700">我們已經成功推導出離子的形成方式與電荷！</p>
+                            <button onClick={onComplete} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-10 rounded-full shadow-lg transition-transform transform hover:scale-105 text-lg animate-bounce">
+                                下一步：離子拼圖 (Next: Puzzle)
+                            </button>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const PuzzlePhase = ({ pair, onComplete }) => {
+            const metal = ELEMENTS[pair.metal];
+            const nonmetal = ELEMENTS[pair.nonmetal];
+
+            const [mCount, setMCount] = React.useState(0);
+            const [nmCount, setNmCount] = React.useState(0);
+            const [isSuccess, setIsSuccess] = React.useState(false);
+            
+            const [draggedType, setDraggedType] = React.useState(null);
+            const [dragPos, setDragPos] = React.useState({ x: 0, y: 0 });
+            
+            const dropZoneRef = React.useRef(null);
+
+            const handlePointerDown = (e, type) => {
+                e.preventDefault();
+                setDraggedType(type);
+                setDragPos({ x: e.clientX || (e.touches && e.touches[0].clientX), y: e.clientY || (e.touches && e.touches[0].clientY) });
+                document.body.classList.remove('scrollable-body');
+            };
+
+            React.useEffect(() => {
+                const handlePointerMove = (e) => {
+                    if (!draggedType) return;
+                    const clientX = e.clientX || (e.touches && e.touches[0].clientX);
+                    const clientY = e.clientY || (e.touches && e.touches[0].clientY);
+                    setDragPos({ x: clientX, y: clientY });
+                };
+
+                const handlePointerUp = (e) => {
+                    if (!draggedType) return;
+                    
+                    const clientX = e.clientX || (e.changedTouches && e.changedTouches[0].clientX);
+                    const clientY = e.clientY || (e.changedTouches && e.changedTouches[0].clientY);
+                    
+                    if (dropZoneRef.current) {
+                        const rect = dropZoneRef.current.getBoundingClientRect();
+                        if (clientX >= rect.left && clientX <= rect.right &&
+                            clientY >= rect.top && clientY <= rect.bottom) {
+                            
+                            if (draggedType === 'metal') setMCount(prev => Math.min(5, prev + 1));
+                            if (draggedType === 'nonmetal') setNmCount(prev => Math.min(5, prev + 1));
+                        }
+                    }
+                    
+                    setDraggedType(null);
+                    document.body.classList.add('scrollable-body');
+                };
+
+                if (draggedType) {
+                    window.addEventListener('mousemove', handlePointerMove);
+                    window.addEventListener('touchmove', handlePointerMove, { passive: false });
+                    window.addEventListener('mouseup', handlePointerUp);
+                    window.addEventListener('touchend', handlePointerUp);
+                }
+
+                return () => {
+                    window.removeEventListener('mousemove', handlePointerMove);
+                    window.removeEventListener('touchmove', handlePointerMove);
+                    window.removeEventListener('mouseup', handlePointerUp);
+                    window.removeEventListener('touchend', handlePointerUp);
+                };
+            }, [draggedType]);
+
+            const removeMetal = () => setMCount(prev => Math.max(0, prev - 1));
+            const removeNonmetal = () => setNmCount(prev => Math.max(0, prev - 1));
+
+            const totalPos = mCount * metal.charge;
+            const totalNeg = nmCount * Math.abs(nonmetal.charge);
+            const isBalanced = totalPos === totalNeg && totalPos > 0;
+
+            return (
+                <div className="fade-in bg-white p-6 rounded-2xl shadow-xl w-full max-w-4xl border border-green-100 relative">
+                    <h2 className="text-2xl font-bold text-green-800 mb-2 border-b pb-2">步驟 2：離子拼圖 (Puzzle Assembly)</h2>
+                    <p className="text-gray-600 mb-6 text-sm">將上方的離子<strong>拖拽</strong>到下方的反應區中，直到正負電荷總數抵消。點擊反應區內的離子可將其移除。</p>
+                    
+                    {/* Source Staging Pool */}
+                    <div className="flex flex-row justify-center gap-12 mb-8 bg-gray-50 p-6 rounded-xl border-2 border-dashed border-gray-300">
+                        <div className="flex flex-col items-center">
+                            <span className="font-bold text-gray-500 text-xs mb-2">拖拽我 (Drag me)</span>
+                            <div 
+                                className="cursor-grab active:cursor-grabbing hover:scale-105 transition-transform touch-none"
+                                onMouseDown={(e) => handlePointerDown(e, 'metal')}
+                                onTouchStart={(e) => handlePointerDown(e, 'metal')}
+                            >
+                                <PuzzlePiece symbol={metal.symbol} charge={metal.charge} />
+                            </div>
+                        </div>
+                        
+                        <div className="flex flex-col items-center">
+                            <span className="font-bold text-gray-500 text-xs mb-2">拖拽我 (Drag me)</span>
+                            <div 
+                                className="cursor-grab active:cursor-grabbing hover:scale-105 transition-transform touch-none"
+                                onMouseDown={(e) => handlePointerDown(e, 'nonmetal')}
+                                onTouchStart={(e) => handlePointerDown(e, 'nonmetal')}
+                            >
+                                <PuzzlePiece symbol={nonmetal.symbol} charge={nonmetal.charge} />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Dragged Clone Overlay */}
+                    {draggedType === 'metal' && (
+                        <div className="dragging-clone" style={{ left: dragPos.x, top: dragPos.y }}>
+                            <PuzzlePiece symbol={metal.symbol} charge={metal.charge} />
+                        </div>
+                    )}
+                    {draggedType === 'nonmetal' && (
+                        <div className="dragging-clone" style={{ left: dragPos.x, top: dragPos.y }}>
+                            <PuzzlePiece symbol={nonmetal.symbol} charge={nonmetal.charge} />
+                        </div>
+                    )}
+
+                    {/* Reaction Flask (Drop Zone) */}
+                    <div 
+                        ref={dropZoneRef}
+                        className={`rounded-xl p-8 min-h-[350px] flex flex-col justify-center items-center transition-colors border-4 ${draggedType ? 'border-green-400 bg-green-50 shadow-inner' : 'border-gray-200 bg-gray-100'} relative`}
+                    >
+                        <div className="absolute top-4 left-4 text-gray-400 font-bold text-lg opacity-50 tracking-wider">
+                            反應區 (Reaction Zone)
+                        </div>
+                        
+                        <div className="absolute top-4 right-4 text-sm font-semibold bg-white px-3 py-1 rounded shadow text-gray-600">
+                            正電荷: <span className="text-orange-500">+{totalPos}</span> | 
+                            負電荷: <span className="text-blue-500">-{totalNeg}</span>
+                        </div>
+
+                        {mCount === 0 && nmCount === 0 ? (
+                            <p className="text-gray-400 italic mt-10">將離子拖放到此處</p>
+                        ) : (
+                            <div className="flex flex-row items-start justify-center cursor-pointer mt-6">
+                                <div className="flex flex-col items-end z-10" onClick={removeMetal} title="點擊移除">
+                                    {Array.from({ length: mCount }).map((_, i) => (
+                                        <div key={`m-${i}`} className="fade-in">
+                                            <PuzzlePiece symbol={metal.symbol} charge={metal.charge} />
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="flex flex-col items-start z-20" style={{ marginLeft: '-25px' }} onClick={removeNonmetal} title="點擊移除">
+                                    {Array.from({ length: nmCount }).map((_, i) => (
+                                        <div key={`nm-${i}`} className="fade-in">
+                                            <PuzzlePiece symbol={nonmetal.symbol} charge={nonmetal.charge} />
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {isBalanced && (
+                            <div className="mt-6 bg-green-500 text-white font-bold px-6 py-2 rounded-full animate-bounce shadow-lg">
+                                電荷已完美平衡！ (Charge Balanced)
+                            </div>
+                        )}
+                    </div>
+
+                    {!isSuccess ? (
+                        <div className="mt-8 text-center">
+                            <button 
+                                disabled={!isBalanced}
+                                onClick={() => setIsSuccess(true)}
+                                className={`font-bold py-3 px-10 rounded-full shadow-lg transition-transform text-lg ${isBalanced ? 'bg-green-600 hover:bg-green-700 text-white transform hover:scale-105' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}
+                            >
+                                確定組合 (Confirm Formula)
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="fade-in text-center bg-green-50 border-2 border-green-400 rounded-xl p-6 mt-8 space-y-4">
+                            <h3 className="text-2xl font-bold text-green-800">🎉 拼圖完成！電荷完美抵消！</h3>
+                            <button onClick={() => onComplete({ mSub: mCount, nmSub: nmCount })} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-10 rounded-full shadow-lg transition-transform transform hover:scale-105 text-lg animate-bounce">
+                                下一步：書寫化學式 (Next: Formula)
+                            </button>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const FormulaPhase = ({ pair, puzzleResult, onComplete }) => {
+            const metal = ELEMENTS[pair.metal];
+            const nonmetal = ELEMENTS[pair.nonmetal];
+
+            const absMCharge = Math.abs(metal.charge);
+            const absNmCharge = Math.abs(nonmetal.charge);
+            const divisor = gcd(absMCharge, absNmCharge);
+
+            const expectedMSub = absNmCharge / divisor;
+            const expectedNmSub = absMCharge / divisor;
+
+            const [mSubInput, setMSubInput] = React.useState('');
+            const [nmSubInput, setNmSubInput] = React.useState('');
+            const [errorMsg, setErrorMsg] = React.useState('');
+            const [isSuccess, setIsSuccess] = React.useState(false);
+
+            const handleCheckFormula = () => {
+                const userM = parseInt(mSubInput) || 1;
+                const userNm = parseInt(nmSubInput) || 1;
+
+                if (userM !== expectedMSub || userNm !== expectedNmSub) {
+                    setErrorMsg(`化學式中的下標比例必須是「最簡整數比」！正確下標應為 ${metal.symbol}:${expectedMSub > 1 ? expectedMSub : '1(省略)'}, ${nonmetal.symbol}:${expectedNmSub > 1 ? expectedNmSub : '1(省略)'}`);
+                    return;
+                }
+
+                setErrorMsg('');
+                setIsSuccess(true);
+            };
+
+            return (
+                <div className="fade-in bg-white p-6 rounded-2xl shadow-xl w-full max-w-4xl border border-green-100">
+                    <h2 className="text-2xl font-bold text-green-800 mb-2 border-b pb-2">步驟 3：書寫化學式 (Chemical Formula)</h2>
+                    
+                    {/* Step 1 Element Reference Summary */}
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
+                        <h4 className="text-xs font-bold text-amber-800 uppercase tracking-wider mb-2">元素分析數據回顧 (Step 1 Reference)</h4>
+                        <div className="grid grid-cols-2 gap-4 text-sm">
+                            <div>
+                                <span className="font-bold text-orange-700">{metal.name} ({metal.symbol}):</span> 電荷 {formatChargeDisplay(metal.charge)} | 電子排佈 {metal.config}
+                            </div>
+                            <div>
+                                <span className="font-bold text-blue-700">{nonmetal.name} ({nonmetal.symbol}):</span> 電荷 {formatChargeDisplay(nonmetal.charge)} | 電子排佈 {nonmetal.config}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Criss-Cross Visualization */}
+                    <div className="bg-gray-50 border rounded-xl p-6 mb-6 flex flex-col items-center">
+                        <h3 className="font-bold text-gray-700 mb-4">交叉法推導 (Criss-Cross Method)</h3>
+                        <div className="relative w-72 h-36 border bg-white rounded-lg p-4 flex justify-between items-center shadow-inner">
+                            {/* Metal Charge */}
+                            <div className="text-center">
+                                <div className="text-3xl font-bold text-orange-600">{metal.symbol}<sup className="text-xl">{formatChargeDisplay(metal.charge)}</sup></div>
+                            </div>
+
+                            {/* SVG Arrows */}
+                            <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 288 144">
+                                <defs>
+                                    <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                                        <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />
+                                    </marker>
+                                </defs>
+                                <path d="M 100 45 L 188 100" stroke="#64748b" strokeWidth="2" strokeDasharray="4 2" markerEnd="url(#arrow)" />
+                                <path d="M 188 45 L 100 100" stroke="#64748b" strokeWidth="2" strokeDasharray="4 2" markerEnd="url(#arrow)" />
+                            </svg>
+
+                            {/* Nonmetal Charge */}
+                            <div className="text-center">
+                                <div className="text-3xl font-bold text-blue-600">{nonmetal.symbol}<sup className="text-xl">{formatChargeDisplay(nonmetal.charge)}</sup></div>
+                            </div>
+                        </div>
+                        <div className="mt-3 text-xs text-gray-500 font-semibold">
+                            電荷數字交叉轉為下標：{metal.symbol}<sub>{absNmCharge}</sub>{nonmetal.symbol}<sub>{absMCharge}</sub> 
+                            {divisor > 1 && `  ➔ 化簡最簡比：${metal.symbol}${expectedMSub > 1 ? expectedMSub : ''}${nonmetal.symbol}${expectedNmSub > 1 ? expectedNmSub : ''}`}
+                        </div>
+                    </div>
+
+                    {!isSuccess ? (
+                        <div className="space-y-6">
+                            <div className="bg-green-50 p-4 rounded-xl border border-green-200 text-center">
+                                <label className="block text-gray-700 font-bold mb-3">請輸入化合物化學式的最簡下標 (Subscripts)</label>
+                                <div className="flex justify-center items-baseline space-x-2 text-3xl font-bold text-gray-800">
+                                    <span>{metal.symbol}</span>
+                                    <input 
+                                        type="number" 
+                                        min="1" 
+                                        value={mSubInput} 
+                                        onChange={e => setMSubInput(e.target.value)} 
+                                        className="w-16 p-2 border-2 border-green-400 rounded text-center text-xl bg-white focus:ring-2 focus:ring-green-500 outline-none" 
+                                        placeholder="1" 
+                                    />
+                                    <span>{nonmetal.symbol}</span>
+                                    <input 
+                                        type="number" 
+                                        min="1" 
+                                        value={nmSubInput} 
+                                        onChange={e => setNmSubInput(e.target.value)} 
+                                        className="w-16 p-2 border-2 border-green-400 rounded text-center text-xl bg-white focus:ring-2 focus:ring-green-500 outline-none" 
+                                        placeholder="1" 
+                                    />
+                                </div>
+                                <p className="text-xs text-gray-500 mt-2">（若下標數值為 1，請輸入 1，系統將自動於化學式中省略顯示）</p>
+                            </div>
+
+                            {errorMsg && (
+                                <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded font-semibold text-center">
+                                    ⚠️ {errorMsg}
+                                </div>
+                            )}
+
+                            <div className="text-center">
+                                <button onClick={handleCheckFormula} className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-10 rounded-full shadow-lg transition-transform transform hover:scale-105 text-lg">
+                                    檢查化學式 (Check Formula)
+                                </button>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="fade-in text-center bg-green-50 border-2 border-green-400 rounded-xl p-8 space-y-6">
+                            <h3 className="text-2xl font-bold text-green-800">🎉 化學式完全正確！</h3>
+                            <div className="text-5xl font-extrabold text-gray-800 tracking-wider">
+                                {metal.symbol}{expectedMSub > 1 && <sub>{expectedMSub}</sub>}
+                                {nonmetal.symbol}{expectedNmSub > 1 && <sub>{expectedNmSub}</sub>}
+                            </div>
+                            <div className="text-3xl font-bold text-blue-700 mt-2">
+                                {pair.compoundName || `${nonmetal.name}化${metal.name}`}
+                            </div>
+                            <button onClick={() => onComplete({ formula: { mSub: expectedMSub, nmSub: expectedNmSub } })} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-10 rounded-full shadow-lg transition-transform transform hover:scale-105 text-lg animate-bounce">
+                                下一步：繪製電子圖 (Next: Electron Diagram)
+                            </button>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const DiagramPhase = ({ pair, formulaResult, onComplete, onBack }) => {
+            const metal = ELEMENTS[pair.metal];
+            const nonmetal = ELEMENTS[pair.nonmetal];
+            
+            const expectedMCoeff = formulaResult?.formula?.mSub || 1;
+            const expectedNmCoeff = formulaResult?.formula?.nmSub || 1;
+
+            const [mCoeffInput, setMCoeffInput] = React.useState('1');
+            const [mFinalConfig, setMFinalConfig] = React.useState(''); 
+            const [mHasBrackets, setMHasBrackets] = React.useState(false);
+            const [mInputCharge, setMInputCharge] = React.useState('');
+
+            const [nmCoeffInput, setNmCoeffInput] = React.useState('1');
+            const [nmFinalConfig, setNmFinalConfig] = React.useState(''); 
+            const [nmHasBrackets, setNmHasBrackets] = React.useState(false);
+            const [nmInputCharge, setNmInputCharge] = React.useState('');
+
+            const [errorMsg, setErrorMsg] = React.useState('');
+            const [isSuccess, setIsSuccess] = React.useState(false);
+
+            const handleVerify = () => {
+                const cleanMConfig = mFinalConfig.replace(/\s+/g, '');
+                const cleanNmConfig = nmFinalConfig.replace(/\s+/g, '');
+
+                const expectedMConfig = getStableConfigOuterOnly(metal.config, metal.charge); 
+                const expectedNmConfig = getStableConfigOuterOnly(nonmetal.config, nonmetal.charge); 
+
+                const expectedMChargeStr = formatChargeDisplay(metal.charge);
+                const expectedNmChargeStr = formatChargeDisplay(nonmetal.charge);
+
+                const userMCoeff = parseInt(mCoeffInput) || 1;
+                const userNmCoeff = parseInt(nmCoeffInput) || 1;
+
+                if (userMCoeff !== expectedMCoeff) return setErrorMsg(`${metal.name} 離子前方的係數（數量）應為 ${expectedMCoeff}！`);
+                if (cleanMConfig !== expectedMConfig) return setErrorMsg(`${metal.name} 離子失去了所有最外層電子，最外層電子數應留空（或填0）！`);
+                if (!mHasBrackets) return setErrorMsg(`${metal.name} 離子需要加上中括號 [ ] 以標示電荷！`);
+                if (mInputCharge !== expectedMChargeStr) return setErrorMsg(`${metal.name} 離子的電荷標示錯誤！`);
+
+                if (userNmCoeff !== expectedNmCoeff) return setErrorMsg(`${nonmetal.name} 離子前方的係數（數量）應為 ${expectedNmCoeff}！`);
+                if (cleanNmConfig !== expectedNmConfig) return setErrorMsg(`${nonmetal.name} 離子獲得了電子，最外層應該填滿 ${expectedNmConfig} 個電子！`);
+                if (!nmHasBrackets) return setErrorMsg(`${nonmetal.name} 離子需要加上中括號 [ ] 以標示電荷！`);
+                if (nmInputCharge !== expectedNmChargeStr) return setErrorMsg(`${nonmetal.name} 離子的電荷標示錯誤！`);
+
+                setErrorMsg('');
+                setIsSuccess(true);
+            };
+
+            const renderIonBuilder = (symbol, title, coeffInput, setCoeffInput, configStr, setConfigStr, hasBrackets, setHasBrackets, inputCharge, setInputCharge, type) => (
+                <div className={`p-5 rounded-xl border ${type === 'cation' ? 'bg-orange-50 border-orange-200' : 'bg-blue-50 border-blue-200'}`}>
+                    <h3 className={`font-bold mb-4 ${type === 'cation' ? 'text-orange-700' : 'text-blue-700'}`}>{title} (僅最外層)</h3>
+                    
+                    <div className="bg-white rounded-lg p-2 mb-4 h-56 flex items-center justify-center border border-gray-200 overflow-hidden">
+                        <BohrDiagramOuterOnly 
+                            symbol={symbol} 
+                            configStr={configStr} 
+                            showBrackets={hasBrackets} 
+                            chargeStr={inputCharge} 
+                            coefficient={coeffInput}
+                        />
+                    </div>
+
+                    <div className="space-y-3 text-sm">
+                        <div className="bg-amber-50 p-2 rounded border border-amber-200">
+                            <label className="font-semibold block mb-1 text-amber-900">離子數量 (係數 Coefficient)</label>
+                            <input 
+                                type="number" 
+                                min="1" 
+                                max="10" 
+                                value={coeffInput} 
+                                onChange={e => setCoeffInput(e.target.value)} 
+                                className="w-full p-2 border rounded focus:ring-2 focus:ring-amber-400 outline-none bg-white font-bold" 
+                                placeholder="預設 1"
+                            />
+                        </div>
+
+                        <div>
+                            <label className="font-semibold block mb-1">最外層電子數</label>
+                            <input type="text" value={configStr} onChange={e => setConfigStr(e.target.value)} className="w-full p-2 border rounded focus:ring-2 focus:ring-green-400 outline-none bg-white" placeholder={type === 'cation' ? "金屬離子留空" : "填滿八隅體 (如: 8)"}/>
+                        </div>
+                        <div className="flex items-center mt-2">
+                            <input type="checkbox" id={`bracket-${symbol}`} checked={hasBrackets} onChange={e => setHasBrackets(e.target.checked)} className="w-4 h-4 text-green-600 rounded" />
+                            <label htmlFor={`bracket-${symbol}`} className="ml-2 font-semibold text-gray-700">加上中括號 [ ]</label>
+                        </div>
+                        <div>
+                            <label className="font-semibold block mb-1">右上角電荷</label>
+                            <input type="text" value={inputCharge} onChange={e => setInputCharge(e.target.value)} className="w-full p-2 border rounded focus:ring-2 focus:ring-green-400 outline-none bg-white" placeholder="例如: 2+, -, 3-"/>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="fade-in bg-white p-6 rounded-2xl shadow-xl w-full max-w-4xl border border-green-100">
+                    <div className="flex justify-between items-center mb-2 border-b pb-2">
+                        <h2 className="text-2xl font-bold text-green-800">步驟 4：電子圖 (Electron Diagram)</h2>
+                        <button onClick={onBack} className="text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold py-1 px-3 rounded-lg transition-colors">
+                            ◀ 上一步
+                        </button>
+                    </div>
+                    <p className="text-gray-600 mb-6 text-sm">請畫出化合物中陽離子與陰離子的<strong>最外層</strong>電子圖。輸入係數、外層電子數、勾選中括號及電荷標示。</p>
+                    
+                    {!isSuccess ? (
+                        <>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                {renderIonBuilder(metal.symbol, '陽離子 (Cation)', mCoeffInput, setMCoeffInput, mFinalConfig, setMFinalConfig, mHasBrackets, setMHasBrackets, mInputCharge, setMInputCharge, 'cation')}
+                                {renderIonBuilder(nonmetal.symbol, '陰離子 (Anion)', nmCoeffInput, setNmCoeffInput, nmFinalConfig, setNmFinalConfig, nmHasBrackets, setNmHasBrackets, nmInputCharge, setNmInputCharge, 'anion')}
+                            </div>
+
+                            {errorMsg && (
+                                <div className="mt-6 bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded font-semibold text-center">
+                                    ⚠️ {errorMsg}
+                                </div>
+                            )}
+
+                            <div className="mt-8 flex justify-between items-center">
+                                <button onClick={onBack} className="bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-3 px-6 rounded-full shadow transition-colors">
+                                    ◀ 上一步 (Back)
+                                </button>
+                                <button onClick={handleVerify} className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-10 rounded-full shadow-lg transition-transform transform hover:scale-105 text-lg">
+                                    完成檢查 (Check Diagram)
+                                </button>
+                            </div>
+                        </>
+                    ) : (
+                        <div className="fade-in flex flex-col items-center">
+                            <div className="my-6 bg-green-50 p-6 rounded-xl border-2 border-green-400 shadow-lg w-full">
+                                <h3 className="text-xl font-bold text-green-800 mb-6 text-center">🎉 完全正確！完美的電子圖如下：</h3>
+                                <div className="flex flex-col md:flex-row justify-center items-center gap-8">
+                                    <div className="flex flex-col items-center bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+                                        <BohrDiagramOuterOnly 
+                                            symbol={metal.symbol} 
+                                            configStr={""} 
+                                            showBrackets={true} 
+                                            chargeStr={formatChargeDisplay(metal.charge)} 
+                                            coefficient={expectedMCoeff}
+                                        />
+                                        <span className="mt-2 font-bold text-orange-600">{metal.name}離子</span>
+                                    </div>
+                                    <div className="flex flex-col items-center bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+                                        <BohrDiagramOuterOnly 
+                                            symbol={nonmetal.symbol} 
+                                            configStr={"8"} 
+                                            showBrackets={true} 
+                                            chargeStr={formatChargeDisplay(nonmetal.charge)} 
+                                            coefficient={expectedNmCoeff}
+                                        />
+                                        <span className="mt-2 font-bold text-blue-600">{nonmetal.name}離子</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <button onClick={onComplete} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-10 rounded-full shadow-lg transition-transform transform hover:scale-105 text-lg animate-bounce">
+                                下一步 (Next Step)
+                            </button>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const CustomSetupPhase = ({ onStart }) => {
+            const metals = Object.values(ELEMENTS).filter(e => e.charge > 0);
+            const nonmetals = Object.values(ELEMENTS).filter(e => e.charge < 0);
+            
+            const [mode, setMode] = React.useState('select');
+
+            const [selMetal, setSelMetal] = React.useState(metals[0]?.symbol || 'Na');
+            const [selNm, setSelNm] = React.useState(nonmetals[0]?.symbol || 'Cl');
+
+            const [customMName, setCustomMName] = React.useState('鈉');
+            const [customMSymbol, setCustomMSymbol] = React.useState('Na');
+            const [customMZ, setCustomMZ] = React.useState('11');
+            const [customMConfig, setCustomMConfig] = React.useState('2,8,1');
+            const [customMCharge, setCustomMCharge] = React.useState('1');
+
+            const [customNmName, setCustomNmName] = React.useState('氯');
+            const [customNmSymbol, setCustomNmSymbol] = React.useState('Cl');
+            const [customNmZ, setCustomNmZ] = React.useState('17');
+            const [customNmConfig, setCustomNmConfig] = React.useState('2,8,7');
+            const [customNmCharge, setCustomNmCharge] = React.useState('-1');
+
+            const [compoundName, setCompoundName] = React.useState('');
+
+            const KNOWN_ELEMENTS = {
+                'H': { z: 1, config: '1', charge: 1, name: '氫' },
+                'Be': { z: 4, config: '2,2', charge: 2, name: '鈹' },
+                'B': { z: 5, config: '2,3', charge: 3, name: '硼' },
+                'C': { z: 6, config: '2,4', charge: -4, name: '碳' },
+                'Br': { z: 35, config: '2,8,18,7', charge: -1, name: '溴' },
+                'I': { z: 53, config: '2,8,18,18,7', charge: -1, name: '碘' },
+                'Ba': { z: 56, config: '2,8,18,18,8,2', charge: 2, name: '鋇' },
+                'Ag': { z: 47, config: '2,8,18,18,1', charge: 1, name: '銀' },
+                'Zn': { z: 30, config: '2,8,18,2', charge: 2, name: '鋅' },
+                'Cu': { z: 29, config: '2,8,18,1', charge: 2, name: '銅' }, 
+                'Fe': { z: 26, config: '2,8,14,2', charge: 2, name: '鐵' },
+            };
+
+            React.useEffect(() => {
+                const sym = customMSymbol.trim();
+                const el = KNOWN_ELEMENTS[sym] || ELEMENTS[sym];
+                if (el && el.charge > 0) {
+                    setCustomMName(el.name);
+                    setCustomMZ(el.z.toString());
+                    setCustomMConfig(el.config);
+                    setCustomMCharge(Math.abs(el.charge).toString());
+                }
+            }, [customMSymbol]);
+
+            React.useEffect(() => {
+                const sym = customNmSymbol.trim();
+                const el = KNOWN_ELEMENTS[sym] || ELEMENTS[sym];
+                if (el && el.charge < 0) {
+                    setCustomNmName(el.name);
+                    setCustomNmZ(el.z.toString());
+                    setCustomNmConfig(el.config);
+                    setCustomNmCharge(el.charge.toString());
+                }
+            }, [customNmSymbol]);
+
+            React.useEffect(() => {
+                if (mode === 'select') {
+                    const m = ELEMENTS[selMetal];
+                    const nm = ELEMENTS[selNm];
+                    if (m && nm) setCompoundName(`${nm.name}化${m.name}`);
+                } else {
+                    setCompoundName(`${customNmName || 'X'}化${customMName || 'M'}`);
+                }
+            }, [mode, selMetal, selNm, customMName, customNmName]);
+
+            const handleStart = () => {
+                let mSym = selMetal;
+                let nmSym = selNm;
+                let newElements = null;
+
+                if (mode === 'manual') {
+                    mSym = customMSymbol.trim() || 'M';
+                    nmSym = customNmSymbol.trim() || 'X';
+
+                    newElements = {};
+                    newElements[mSym] = {
+                        z: parseInt(customMZ) || 1,
+                        config: customMConfig.trim() || '1',
+                        charge: Math.abs(parseInt(customMCharge)) || 1,
+                        symbol: mSym,
+                        name: customMName.trim() || mSym
+                    };
+
+                    newElements[nmSym] = {
+                        z: parseInt(customNmZ) || 1,
+                        config: customNmConfig.trim() || '1',
+                        charge: -Math.abs(parseInt(customNmCharge)) || -1,
+                        symbol: nmSym,
+                        name: customNmName.trim() || nmSym
+                    };
+                }
+                
+                onStart({ metal: mSym, nonmetal: nmSym, compoundName: compoundName.trim() }, newElements);
+            };
+
+            return (
+                <div className="fade-in bg-white p-8 rounded-2xl shadow-xl w-full max-w-2xl border-t-8 border-purple-500 mx-auto">
+                    <h2 className="text-2xl font-bold text-purple-800 mb-4 border-b pb-2">教師自設題目 (Custom Challenge)</h2>
+                    
+                    <div className="flex bg-purple-50 p-1 rounded-xl mb-6 border border-purple-200">
+                        <button 
+                            onClick={() => setMode('select')} 
+                            className={`flex-1 py-2 text-center font-bold rounded-lg transition-colors text-sm ${mode === 'select' ? 'bg-purple-600 text-white shadow' : 'text-purple-700 hover:bg-purple-100'}`}
+                        >
+                            快速選取元素 (Preset)
+                        </button>
+                        <button 
+                            onClick={() => setMode('manual')} 
+                            className={`flex-1 py-2 text-center font-bold rounded-lg transition-colors text-sm ${mode === 'manual' ? 'bg-purple-600 text-white shadow' : 'text-purple-700 hover:bg-purple-100'}`}
+                        >
+                            手動輸入新元素 (Custom Input)
+                        </button>
+                    </div>
+
+                    {mode === 'select' ? (
+                        <div>
+                            <div className="mb-6">
+                                <label className="block text-gray-700 font-bold mb-2 text-sm">選擇金屬 (Metal / Cation)</label>
+                                <select value={selMetal} onChange={e=>setSelMetal(e.target.value)} className="w-full p-3 border-2 border-purple-200 rounded-lg outline-none focus:border-purple-500 text-base bg-white">
+                                    {metals.map(m => <option key={m.symbol} value={m.symbol}>{m.name} ({m.symbol}) : {formatChargeDisplay(m.charge)}</option>)}
+                                </select>
+                            </div>
+                            
+                            <div className="mb-8">
+                                <label className="block text-gray-700 font-bold mb-2 text-sm">選擇非金屬 (Non-Metal / Anion)</label>
+                                <select value={selNm} onChange={e=>setSelNm(e.target.value)} className="w-full p-3 border-2 border-purple-200 rounded-lg outline-none focus:border-purple-500 text-base bg-white">
+                                    {nonmetals.map(nm => <option key={nm.symbol} value={nm.symbol}>{nm.name} ({nm.symbol}) : {formatChargeDisplay(nm.charge)}</option>)}
+                                </select>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="space-y-6 mb-8 text-xs">
+                            <div className="p-4 bg-orange-50 border border-orange-200 rounded-xl">
+                                <h4 className="font-bold text-orange-800 text-sm mb-3">金屬元素 (陽離子)</h4>
+                                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                                    <div>
+                                        <label className="font-semibold block text-gray-600 mb-1">中文名稱</label>
+                                        <input type="text" value={customMName} onChange={e=>setCustomMName(e.target.value)} className="w-full p-2 border rounded bg-white" placeholder="如: 鈉"/>
+                                    </div>
+                                    <div>
+                                        <label className="font-semibold block text-gray-600 mb-1">元素符號</label>
+                                        <input type="text" value={customMSymbol} onChange={e=>setCustomMSymbol(e.target.value)} className="w-full p-2 border rounded bg-white" placeholder="如: Na"/>
+                                    </div>
+                                    <div>
+                                        <label className="font-semibold block text-gray-600 mb-1">原子序 (Z)</label>
+                                        <input type="number" value={customMZ} onChange={e=>setCustomMZ(e.target.value)} className="w-full p-2 border rounded bg-white" placeholder="如: 11"/>
+                                    </div>
+                                    <div>
+                                        <label className="font-semibold block text-gray-600 mb-1">電子排佈</label>
+                                        <input type="text" value={customMConfig} onChange={e=>setCustomMConfig(e.target.value)} className="w-full p-2 border rounded bg-white" placeholder="如: 2,8,1"/>
+                                    </div>
+                                    <div>
+                                        <label className="font-semibold block text-gray-600 mb-1">離子電荷</label>
+                                        <select value={customMCharge} onChange={e=>setCustomMCharge(e.target.value)} className="w-full p-2 border rounded bg-white font-bold">
+                                            <option value="1">+1</option>
+                                            <option value="2">+2</option>
+                                            <option value="3">+3</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl">
+                                <h4 className="font-bold text-blue-800 text-sm mb-3">非金屬元素 (陰離子)</h4>
+                                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                                    <div>
+                                        <label className="font-semibold block text-gray-600 mb-1">中文名稱</label>
+                                        <input type="text" value={customNmName} onChange={e=>setCustomNmName(e.target.value)} className="w-full p-2 border rounded bg-white" placeholder="如: 氯"/>
+                                    </div>
+                                    <div>
+                                        <label className="font-semibold block text-gray-600 mb-1">元素符號</label>
+                                        <input type="text" value={customNmSymbol} onChange={e=>setCustomNmSymbol(e.target.value)} className="w-full p-2 border rounded bg-white" placeholder="如: Cl"/>
+                                    </div>
+                                    <div>
+                                        <label className="font-semibold block text-gray-600 mb-1">原子序 (Z)</label>
+                                        <input type="number" value={customNmZ} onChange={e=>setCustomNmZ(e.target.value)} className="w-full p-2 border rounded bg-white" placeholder="如: 17"/>
+                                    </div>
+                                    <div>
+                                        <label className="font-semibold block text-gray-600 mb-1">電子排佈</label>
+                                        <input type="text" value={customNmConfig} onChange={e=>setCustomNmConfig(e.target.value)} className="w-full p-2 border rounded bg-white" placeholder="如: 2,8,7"/>
+                                    </div>
+                                    <div>
+                                        <label className="font-semibold block text-gray-600 mb-1">離子電荷</label>
+                                        <select value={customNmCharge} onChange={e=>setCustomNmCharge(e.target.value)} className="w-full p-2 border rounded bg-white font-bold">
+                                            <option value="-1">-1</option>
+                                            <option value="-2">-2</option>
+                                            <option value="-3">-3</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
+                    <div className="mb-6 bg-green-50 p-4 border border-green-200 rounded-xl shadow-sm">
+                        <label className="block text-gray-700 font-bold mb-2 text-sm text-center">化合物中文名稱 (可自行修改，例如加上氧化態)</label>
+                        <input 
+                            type="text" 
+                            value={compoundName} 
+                            onChange={e => setCompoundName(e.target.value)} 
+                            className="w-full p-3 border-2 border-green-300 rounded-lg outline-none focus:border-green-500 text-xl font-bold text-center bg-white text-blue-700" 
+                            placeholder="例如：氧化鐵(II)"
+                        />
+                    </div>
+                    
+                    <button onClick={handleStart} className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transition-transform transform hover:scale-105 text-lg">
+                        儲存為新關卡並開始 (Save & Start)
+                    </button>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [isLoading, setIsLoading] = React.useState(true);
+            const [gamePairs, setGamePairs] = React.useState(DEFAULT_GAME_PAIRS);
+            const [currentPairIndex, setCurrentPairIndex] = React.useState(0);
+            const [activePair, setActivePair] = React.useState(null);
+            const [phase, setPhase] = React.useState('config'); 
+            const [puzzleResult, setPuzzleResult] = React.useState(null);
+            const [formulaResult, setFormulaResult] = React.useState(null);
+            const [gameFinished, setGameFinished] = React.useState(false);
+
+            React.useEffect(() => {
+                const loadData = async () => {
+                    const isFbReady = await initFirebase();
+                    if (isFbReady && docRef) {
+                        const { getDoc } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
+                        try {
+                            const docSnap = await getDoc(docRef);
+                            if (docSnap.exists()) {
+                                const data = docSnap.data();
+                                if (data.elements) {
+                                    Object.assign(ELEMENTS, data.elements);
+                                }
+                                if (data.gamePairs && data.gamePairs.length > 0) {
+                                    setGamePairs(data.gamePairs);
+                                    setActivePair(data.gamePairs[0]);
+                                } else {
+                                    setActivePair(DEFAULT_GAME_PAIRS[0]);
+                                }
+                            } else {
+                                setActivePair(DEFAULT_GAME_PAIRS[0]);
+                            }
+                        } catch(e) {
+                            console.error("讀取存檔失敗:", e);
+                            setActivePair(DEFAULT_GAME_PAIRS[0]);
+                        }
+                    } else {
+                        // 當地無環境或錯誤時的回退方案
+                        setActivePair(DEFAULT_GAME_PAIRS[0]);
+                    }
+                    setIsLoading(false);
+                };
+                loadData();
+            }, []);
+
+            const saveProgress = async (newPairs, updatedElements) => {
+                if (docRef && setDocRef) {
+                    try {
+                        await setDocRef(docRef, {
+                            elements: updatedElements,
+                            gamePairs: newPairs
+                        }, { merge: true });
+                    } catch(e) {
+                        console.error("雲端儲存失敗: ", e);
+                    }
+                }
+            };
+
+            const jumpToPair = (idx, pairs = gamePairs) => {
+                setCurrentPairIndex(idx);
+                setActivePair(pairs[idx]);
+                setPhase('config');
+                setPuzzleResult(null);
+                setFormulaResult(null);
+                setGameFinished(false);
+            };
+
+            const goBackPhase = () => {
+                if (phase === 'puzzle') setPhase('config');
+                else if (phase === 'formula') setPhase('puzzle');
+                else if (phase === 'diagram') setPhase('formula');
+            };
+
+            const nextLevel = () => {
+                if (currentPairIndex < gamePairs.length - 1) {
+                    jumpToPair(currentPairIndex + 1);
+                } else {
+                    setGameFinished(true);
+                }
+            };
+
+            const startCustomLevel = (pair, newElements) => {
+                if (newElements) {
+                    Object.assign(ELEMENTS, newElements);
+                }
+                
+                const existingIdx = gamePairs.findIndex(p => p.metal === pair.metal && p.nonmetal === pair.nonmetal);
+                
+                let newPairs;
+                if (existingIdx !== -1) {
+                    newPairs = [...gamePairs];
+                    newPairs[existingIdx] = pair;
+                } else {
+                    newPairs = [...gamePairs, pair];
+                }
+                
+                setGamePairs(newPairs);
+                
+                // 將新進度與元素保存至雲端
+                saveProgress(newPairs, ELEMENTS);
+                
+                const targetIdx = existingIdx !== -1 ? existingIdx : newPairs.length - 1;
+                jumpToPair(targetIdx, newPairs);
+            };
+
+            const renderProgress = () => (
+                <div className="w-full max-w-4xl mx-auto mb-6 flex flex-col md:flex-row justify-between items-center bg-green-800 text-white px-6 py-3 rounded-2xl shadow-md z-50 relative gap-3">
+                    <div className="flex items-center gap-3">
+                        <span className="font-bold text-lg">離子化合物拼圖</span>
+                        
+                        <select 
+                            value={phase === 'setup' ? 'custom' : currentPairIndex} 
+                            onChange={(e) => {
+                                if (e.target.value === 'custom') setPhase('setup');
+                                else jumpToPair(parseInt(e.target.value));
+                            }}
+                            className="bg-green-700 text-white text-xs font-semibold py-1 px-2 rounded-lg border border-green-500 outline-none cursor-pointer"
+                        >
+                            {gamePairs.map((pair, idx) => (
+                                <option key={idx} value={idx}>
+                                    關卡 {idx + 1}: {pair.compoundName || `${ELEMENTS[pair.nonmetal]?.name || pair.nonmetal}化${ELEMENTS[pair.metal]?.name || pair.metal}`} ({pair.metal}{pair.nonmetal})
+                                </option>
+                            ))}
+                            <option value="custom">➕ 新增關卡 (自設)</option>
+                        </select>
+                    </div>
+                    
+                    {phase !== 'setup' && !gameFinished && (
+                        <div className="flex space-x-2">
+                            {['config', 'puzzle', 'formula', 'diagram'].map((p, i) => {
+                                const phases = ['config', 'puzzle', 'formula', 'diagram', 'success'];
+                                const currentIndex = phases.indexOf(phase);
+                                const isActive = currentIndex >= i;
+                                return (
+                                    <div key={p} className={`w-3 h-3 rounded-full ${isActive ? 'bg-green-300 shadow-[0_0_8px_#86efac]' : 'bg-green-900'} transition-colors duration-300`}></div>
+                                );
+                            })}
+                        </div>
+                    )}
+                    
+                    <div className="flex items-center space-x-3">
+                        <button 
+                            onClick={() => setPhase('setup')}
+                            className="bg-purple-500 hover:bg-purple-400 text-white text-xs font-bold py-1.5 px-3 rounded-full transition-colors"
+                        >
+                            ⚙️ 自設題目
+                        </button>
+                    </div>
+                </div>
+            );
+
+            if (isLoading) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-green-50">
+                        <div className="flex flex-col items-center space-y-4">
+                            <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-green-600"></div>
+                            <span className="text-green-700 font-bold text-lg fade-in">正在同步雲端資料...</span>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (gameFinished) {
+                return (
+                    <div className="min-h-screen flex flex-col items-center py-10 px-4">
+                        {renderProgress()}
+                        <div className="flex flex-col items-center justify-center h-[70vh]">
+                            <div className="bg-white p-10 rounded-2xl shadow-2xl text-center max-w-lg w-full border-t-8 border-green-500 fade-in">
+                                <h1 className="text-3xl font-bold text-green-600 mb-4">🎉 恭喜完全通關！</h1>
+                                <p className="text-gray-600 mb-8">你已經掌握了所有關卡的元素分析、離子拼圖、化學式書寫，以及完整的電子圖繪製！</p>
+                                <button onClick={() => jumpToPair(0)} className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-8 rounded-full shadow-md transition-transform hover:scale-105">
+                                    返回關卡 1 (Level 1)
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen flex flex-col items-center py-10 px-4">
+                    {renderProgress()}
+                    
+                    <div className="w-full flex justify-center pb-20">
+                        {phase === 'setup' && (
+                            <CustomSetupPhase onStart={startCustomLevel} />
+                        )}
+
+                        {phase === 'config' && (
+                            <ConfigPhase pair={activePair} onComplete={() => setPhase('puzzle')} />
+                        )}
+                        
+                        {phase === 'puzzle' && (
+                            <div className="w-full flex flex-col items-center">
+                                <PuzzlePhase pair={activePair} onComplete={(res) => {
+                                    setPuzzleResult(res);
+                                    setPhase('formula');
+                                }} />
+                                <button onClick={goBackPhase} className="mt-4 text-gray-500 hover:text-gray-700 font-bold underline text-sm">
+                                    ◀ 返回步驟 1 (元素分析)
+                                </button>
+                            </div>
+                        )}
+                        
+                        {phase === 'formula' && (
+                            <div className="w-full flex flex-col items-center">
+                                <FormulaPhase pair={activePair} puzzleResult={puzzleResult} onComplete={(res) => {
+                                    setFormulaResult(res);
+                                    setPhase('diagram');
+                                }} />
+                                <button onClick={goBackPhase} className="mt-4 text-gray-500 hover:text-gray-700 font-bold underline text-sm">
+                                    ◀ 返回步驟 2 (離子拼圖)
+                                </button>
+                            </div>
+                        )}
+
+                        {phase === 'diagram' && (
+                            <DiagramPhase pair={activePair} formulaResult={formulaResult} onComplete={() => setPhase('success')} onBack={goBackPhase} />
+                        )}
+
+                        {phase === 'success' && (
+                            <div className="fade-in bg-white p-8 rounded-2xl shadow-xl w-full max-w-md text-center border-t-8 border-green-500">
+                                <h2 className="text-3xl font-bold text-green-600 mb-3">做得好！🌟</h2>
+                                <p className="text-gray-700 mb-6 font-medium">
+                                    此化合物的結構與電子圖非常完美！
+                                </p>
+                                <button onClick={nextLevel} className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-10 rounded-full shadow-lg transition-transform transform hover:scale-105 text-lg w-full">
+                                    {(currentPairIndex < gamePairs.length - 1) ? '挑戰下一題 (Next Level)' : '完成 (Finish)'}
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
